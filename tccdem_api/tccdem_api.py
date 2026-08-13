@@ -8,7 +8,7 @@ from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 
 def load_config():
     from dotenv import load_dotenv
-    load_dotenv(Path.home() / ".config/TCCDEM_DB/db.env")
+    load_dotenv(Path.home() / ".config/tccdem_db/db.env")
 
 load_config()
 PACKAGE_DIR = Path(__file__).resolve().parent
