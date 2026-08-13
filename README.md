@@ -16,7 +16,7 @@ A Python interface for storing, querying, and managing crystal structure data an
 
 ## Configuration & Environment Setup
 
-The API automatically loads environment variables from your home directory at `~/.config/TCCDEM_DB/db.env`. Ensure your `.env` file contains the following keys:
+The API automatically loads environment variables from your home directory at `~/.config/tccdem_db/db.env`. Ensure your `.env` file contains the following keys:
 
 ```env
 tccdem_db_host=localhost
