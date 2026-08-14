@@ -112,7 +112,7 @@ class MaterialDatabaseAPI:
         """
         def get_PN(Symb):
             csv_path = PACKAGE_DIR / "data" / "Z_PN_Elem_extended_MD.csv"
-            with open(csv_path,'r') as file:
+            with open(csv_path,'r', encoding='utf-8-sig') as file:
                 Comp_list={}
                 for line in file:
                     if 'PN' in line:
@@ -127,12 +127,8 @@ class MaterialDatabaseAPI:
         cursor = conn.cursor()
         
         try:
-            # 1. Handle Upload Metadata
-            upload_query = "INSERT INTO Uploads (username, project) VALUES (%s, %s);"
-            cursor.execute(upload_query, (username, project))
-            upload_id = cursor.lastrowid
-
-            # 2. Extract and Handle Composition via Pymatgen
+            # 1. Prepare Data
+            # 1.1 Extract and Handle Composition via Pymatgen
             comp = structure_obj.composition
             formula = self.order_formula(comp.reduced_formula)      ## make it alphabetical
 
@@ -148,8 +144,20 @@ class MaterialDatabaseAPI:
             sga = SpacegroupAnalyzer(structure_obj, symprec=1e-2, angle_tolerance=5)
             spacegroup=sga.get_space_group_number()
 
-            fu=1
+            natoms=int(structure_obj.num_sites)
+            fu=structure_obj.composition.get_reduced_composition_and_factor()[1]
 
+            # 1.2 Serialize and compress Pymatgen structure to Binary MediumBlob
+            structure_dict = structure_obj.as_dict()
+            json_bytes = json.dumps(structure_dict).encode('utf-8')
+            compressed_structure = zlib.compress(json_bytes)
+
+            # 2. Insert into Uploads Table
+            upload_query = "INSERT INTO Uploads (username, project) VALUES (%s, %s);"
+            cursor.execute(upload_query, (username, project))
+            upload_id = cursor.lastrowid
+
+            # 3. Insert into Compounds Table
             comp_query = """
             INSERT INTO Compositions (formula, generic, ntypes, element_list, PN_list)
             VALUES (%s, %s, %s, %s, %s)
@@ -157,11 +165,6 @@ class MaterialDatabaseAPI:
             """
             cursor.execute(comp_query, (formula, generic, ntypes, json.dumps(elements), json.dumps(pn_list)))
             comp_id = cursor.lastrowid
-
-            # 3. Serialize and compress Pymatgen structure to Binary MediumBlob
-            structure_dict = structure_obj.as_dict()
-            json_bytes = json.dumps(structure_dict).encode('utf-8')
-            compressed_structure = zlib.compress(json_bytes)
 
             # 4. Insert into Structures Table
             struc_query = """
@@ -171,13 +174,13 @@ class MaterialDatabaseAPI:
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """
             struc_data = (
-                comp_id, upload_id, spacegroup, prototype, int(structure_obj.num_sites), 
+                comp_id, upload_id, spacegroup, prototype, natoms, 
                 fu, dimension, is_struct_new, is_sg_new, similar_to, compressed_structure, relaxation
             )
             cursor.execute(struc_query, struc_data)
             struc_id = cursor.lastrowid
 
-            # 5. Insert associated Machine Learning Properties (e.g., MACE Energy)
+            # 5. Insert into Porperties Table (e.g., MACE Energy)
             if properties_dict:
                 prop_query = """
                 INSERT INTO Properties (struc_id, upload_id, property, value, unit, program)
@@ -197,9 +200,15 @@ class MaterialDatabaseAPI:
             return struc_id
 
         except mysql.connector.Error as err:
-            conn.rollback()
+            conn.rollback() # The database is restored to its exact state before the transaction began, preventing partial, corrupted, or inconsistent data.
             print(f"Transaction failed, rolled back changes. Error: {err}")
-            raise err
+        except TypeError:
+             print("Error: Pymatgen's get_space_group_number() function failed: 'NoneType' object is not subscriptable\n")
+             conn.rollback()
+        except Exception as e:
+            # Catches broader symmetry analysis errors (e.g., spglib / tolerance errors)
+            print(f"Error: {e}\n")
+            conn.rollback()
         finally:
             cursor.close()
             conn.close()
