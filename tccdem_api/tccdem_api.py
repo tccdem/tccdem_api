@@ -213,7 +213,68 @@ class MaterialDatabaseAPI:
             cursor.close()
             conn.close()
 
-    def get_project_list(self):
+    def upload_property(self, struc_id: int, properties_dict: dict, project: str = "Property_Upload"):
+        """
+        Uploads new properties for an existing structure identified by struc_id.
+        Creates a brand new upload_id in the Uploads table for this property upload event.
+        
+        properties_dict expects format: 
+        {
+            'property_name': {'value': float, 'unit': str, 'program': str}, ...
+        }
+        """
+        if not properties_dict:
+            print("No properties provided to upload.")
+            return False
+
+        username = os.environ.get("USER")
+        conn = self._get_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        try:
+            # 1. Verify that the target structure exists
+            cursor.execute("SELECT struc_id FROM Structures WHERE struc_id = %s;", (struc_id,))
+            if not cursor.fetchone():
+                print(f"Error: Structure with struc_id {struc_id} does not exist.")
+                return False
+
+            # 2. Create a new entry in the Uploads table
+            upload_query = "INSERT INTO Uploads (username, project) VALUES (%s, %s);"
+            cursor.execute(upload_query, (username, project))
+            new_upload_id = cursor.lastrowid
+
+            # 3. Insert the properties linked to struc_id and new_upload_id
+            prop_query = """
+            INSERT INTO Properties (struc_id, upload_id, property, value, unit, program)
+            VALUES (%s, %s, %s, %s, %s, %s);
+            """
+            prop_payload = []
+            for prop_name, data in properties_dict.items():
+                prop_payload.append((
+                    struc_id, 
+                    new_upload_id, 
+                    prop_name, 
+                    data["value"], 
+                    data.get("unit"), 
+                    data.get("program")
+                ))
+
+            cursor.executemany(prop_query, prop_payload)
+
+            # Commit the transaction
+            conn.commit()
+            print(f"Successfully uploaded {len(prop_payload)} propert(ies) for struc_id: {struc_id} under new upload_id: {new_upload_id}.")
+            return new_upload_id
+
+        except mysql.connector.Error as err:
+            conn.rollback()
+            print(f"Failed to upload properties, rolled back changes. Error: {err}")
+            raise err
+        finally:
+            cursor.close()
+            conn.close()
+
+    def get_projects(self):
         conn = self._get_connection()
         cursor = conn.cursor(dictionary=True)
 
@@ -237,8 +298,38 @@ class MaterialDatabaseAPI:
             cursor.close()
             conn.close()
         return data
+    
+    def get_users(self):
+        conn = self._get_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        query="""
+            SELECT DISTINCT username FROM Uploads;
+        """
+        try:
+            cursor.execute(query,)
+            rows = cursor.fetchall()
+            data=[]
+            if not rows:
+                return data
+            
+            for row in rows:
+                data.append(row["username"])
+
+        except mysql.connector.Error as err:
+                    print(f"Database query failed. Error: {err}")
+                    raise err
+        finally:
+            cursor.close()
+            conn.close()
+        return data
 
     def get_property(self, by=None, entry=None):
+
+        valid_criteria = ["comp", "composition", "project", "user"]
+        if by not in valid_criteria or entry is None:
+            print(f"Error: Invalid criteria. 'by' must be one of {valid_criteria} and 'entry' must be provided.")
+            return False
 
         conn = self._get_connection()
         cursor = conn.cursor(dictionary=True)
@@ -257,11 +348,14 @@ class MaterialDatabaseAPI:
                 p.value,
                 p.unit,
                 p.program,
+                p.prop_id,
                 s.is_struct_new,
                 s.is_SG_new,
                 s.similar_to,
                 s.relaxation,
-                u.project
+                u.project,
+                u.username,
+                u.uploaded_at
             FROM Compositions c
             JOIN Structures s ON c.comp_id = s.comp_id
             JOIN Properties p ON s.struc_id = p.struc_id
@@ -272,16 +366,17 @@ class MaterialDatabaseAPI:
             query+="\nWHERE c.formula = %s;"
         elif(by=="project"):
             query+="\nWHERE u.project = %s;"
+        elif(by=="user"):
+            query+="\nWHERE u.username = %s;"
         else:
             query+=";"
              
         try:
-            if((by=="comp") or (by=="composition") or (by=="project")):
+            if((by=="comp") or (by=="composition") or (by=="project") or (by=="user")):
                 cursor.execute(query, (entry,))
             else:
                 cursor.execute(query,)
             rows = cursor.fetchall()
-            print("rows",rows)
 
             data=[]
             if not rows:
@@ -298,6 +393,7 @@ class MaterialDatabaseAPI:
                     "formula_pretty": row['formula'],
                     # "composition_reduced": struct_obj.composition.reduced_formula,
                     "struc_id": row['struc_id'],
+                    "prop_id":row['prop_id'],
                     "property": row['property_name'],
                     "value": row['value'],
                     "unit": row['unit'],
@@ -311,7 +407,9 @@ class MaterialDatabaseAPI:
                     "is_SG_new": row['is_SG_new'],
                     "similar_to": row['similar_to'],
                     "relaxation": row['relaxation'],
-                    "project": row['project']
+                    "project": row['project'],
+                    "user": row['username'],
+                    "upload_time": row['uploaded_at']
                 }
                 data.append(entry)
             return data
@@ -325,6 +423,11 @@ class MaterialDatabaseAPI:
 
 
     def get_structure(self, by=None, entry=None):
+
+        valid_criteria = ["comp", "composition", "project", "user"]
+        if by not in valid_criteria or entry is None:
+            print(f"Error: Invalid criteria. 'by' must be one of {valid_criteria} and 'entry' must be provided.")
+            return False
 
         conn = self._get_connection()
         cursor = conn.cursor(dictionary=True)
@@ -344,7 +447,9 @@ class MaterialDatabaseAPI:
                 s.is_SG_new,
                 s.similar_to,
                 s.relaxation,
-                u.project
+                u.project,
+                u.username,
+                u.uploaded_at
             FROM Compositions c
             JOIN Structures s ON c.comp_id = s.comp_id
             JOIN Uploads u ON s.upload_id = u.upload_id"""
@@ -354,16 +459,17 @@ class MaterialDatabaseAPI:
             query+="\nWHERE c.formula = %s;"
         elif(by=="project"):
             query+="\nWHERE u.project = %s;"
+        elif(by=="user"):
+            query+="\nWHERE u.username = %s;"
         else:
             query+=";"
              
         try:
-            if((by=="comp") or (by=="composition") or (by=="project")):
+            if((by=="comp") or (by=="composition") or (by=="project") or (by=="user")):
                 cursor.execute(query, (entry,))
             else:
                 cursor.execute(query,)
             rows = cursor.fetchall()
-            print("rows",rows)
 
             data=[]
             if not rows:
@@ -389,7 +495,9 @@ class MaterialDatabaseAPI:
                     "is_SG_new": row['is_SG_new'],
                     "similar_to": row['similar_to'],
                     "relaxation": row['relaxation'],
-                    "project": row['project']
+                    "project": row['project'],
+                    "user": row['username'],
+                    "upload_time": row['uploaded_at']
                 }
                 data.append(entry)
             return data
@@ -455,9 +563,15 @@ class MaterialDatabaseAPI:
             Safely clears all data from Uploads, Structures, Properties, and Compositions,
             resetting all auto-increment IDs back to 1.
             """
+
+            choice = input("Do you want to delete all entries in the database? (y/n): ").strip().lower()
+            if choice!="y":
+                 print("Operation aborted.")
+                 return False
+            
             conn = self._get_connection()
             cursor = conn.cursor()
-            
+
             try:
                 print("Clearing all data from TCCDEM_DB...")
                 
@@ -483,3 +597,94 @@ class MaterialDatabaseAPI:
             finally:
                 cursor.close()
                 conn.close()
+
+    def clear_entries(self, by=None, entry=None):
+        """
+        Deletes specific entries from database tables based on criteria:
+        Parameters:
+            by (str): 'struc_id', 'prop_id', 'project', or 'user' (or 'username')
+            entry (str | int): The value matching the 'by' filter.
+        """
+        valid_criteria = ["struc_id", "prop_id", "project", "user", "username"]
+        if by not in valid_criteria or entry is None:
+            print(f"Error: Invalid criteria. 'by' must be one of {valid_criteria} and 'entry' must be provided.")
+            return False
+
+        # Normalize username/user key
+        filter_by = "username" if by == "user" else by
+
+        choice = input(f"Are you sure you want to delete entries where {filter_by} = '{entry}'? (y/n): ").strip().lower()
+        if choice != "y":
+            print("Operation aborted.")
+            return False
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            # Case 1: Delete only a single Property record
+            if filter_by == "prop_id":
+                cursor.execute("DELETE FROM Properties WHERE prop_id = %s;", (entry,))
+                deleted_rows = cursor.rowcount
+                print(f"Deleted {deleted_rows} record from Properties.")
+
+            # Case 2: Delete by Structure ID (Deletes child Properties, then Structure)
+            elif filter_by == "struc_id":
+                # Delete associated properties first
+                cursor.execute("DELETE FROM Properties WHERE struc_id = %s;", (entry,))
+                prop_count = cursor.rowcount
+
+                # Delete the structure itself
+                cursor.execute("DELETE FROM Structures WHERE struc_id = %s;", (entry,))
+                struc_count = cursor.rowcount
+                print(f"Deleted {struc_count} structure and {prop_count} associated property record(s).")
+
+            # Case 3: Delete by Project or User
+            elif filter_by in ["project", "username"]:
+                column_name = "project" if filter_by == "project" else "username"
+                
+                # Fetch target upload IDs
+                cursor.execute(f"SELECT upload_id FROM Uploads WHERE {column_name} = %s;", (entry,))
+                upload_rows = cursor.fetchall()
+                
+                if not upload_rows:
+                    print(f"No records found for {filter_by} = '{entry}'.")
+                    return False
+                
+                upload_ids = [row[0] for row in upload_rows]
+                format_strings = ','.join(['%s'] * len(upload_ids))
+
+                # 1. Delete associated Properties
+                cursor.execute(f"DELETE FROM Properties WHERE upload_id IN ({format_strings});", tuple(upload_ids))
+                prop_count = cursor.rowcount
+
+                # 2. Delete associated Structures
+                cursor.execute(f"DELETE FROM Structures WHERE upload_id IN ({format_strings});", tuple(upload_ids))
+                struc_count = cursor.rowcount
+
+                # 3. Delete Upload records
+                cursor.execute(f"DELETE FROM Uploads WHERE upload_id IN ({format_strings});", tuple(upload_ids))
+                upload_count = cursor.rowcount
+
+                print(f"Deleted {upload_count} upload(s), {struc_count} structure(s), and {prop_count} property record(s).")
+
+            # Clean up orphaned compositions that no longer have any associated structures
+            cursor.execute("""
+                DELETE FROM Compositions 
+                WHERE comp_id NOT IN (SELECT DISTINCT comp_id FROM Structures WHERE comp_id IS NOT NULL);
+            """)
+            orphaned_comps = cursor.rowcount # returns the number of rows affected or retrieved by the most recently executed SQL statement
+            if orphaned_comps > 0:
+                print(f"Cleaned up {orphaned_comps} orphaned composition record(s).")
+
+            conn.commit()
+            print("Deletion completed successfully.")
+            return True
+
+        except mysql.connector.Error as err:
+            conn.rollback()
+            print(f"Failed to delete entries. Changes rolled back. Error: {err}")
+            raise err
+        finally:
+            cursor.close()
+            conn.close()
