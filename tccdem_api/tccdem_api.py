@@ -53,7 +53,7 @@ class MaterialDatabaseAPI:
             comp_ordered+=comp_decomp[j]
         return comp_ordered        
     
-    def StructureControl(self,comp,new_struc):
+    def StructureControl(self,comp,new_struc,project):
         from pymatgen.analysis.structure_matcher import StructureMatcher
         from pymatgen.core import Structure
         conn = self._get_connection()
@@ -65,13 +65,14 @@ class MaterialDatabaseAPI:
                 s.structure AS compressed_structure
             FROM Structures s
             JOIN Compositions c ON s.comp_id = c.comp_id
-            WHERE c.formula = %s;
+            JOIN Uploads u ON u.upload_id = s.upload_id
+            WHERE c.formula = %s and u.project = %s;
             """
 
         try:
             # print("\nStructure Control Module is activated...")
             comp=self.order_formula(comp)
-            cursor.execute(query,(comp,))
+            cursor.execute(query,(comp,project,))
             rows = cursor.fetchall()
             data={}
             for row in rows:
@@ -87,7 +88,7 @@ class MaterialDatabaseAPI:
                     similar_to=key
                     print("The structure is similar to struc_id:",key,"\n")
                     return(0)
-            print("The structure is unique.\n")
+            # print("The structure is unique.")
             return(1)
                      
 
@@ -105,7 +106,10 @@ class MaterialDatabaseAPI:
                            similar_to: str = None,relaxation: str = None):
         """
         Uploads an entire CSP generation run to the database in a safe transaction.
-        properties_dict expects format: 
+
+        structure_obj expect Ase Structure object
+
+        properties_dict expects format (If there is no property, leave it None): 
         {
             'property_name': {'value': float, 'unit': str, 'program': str}, ...
         }
@@ -133,7 +137,7 @@ class MaterialDatabaseAPI:
             formula = self.order_formula(comp.reduced_formula)      ## make it alphabetical
 
             # Uniqueness Check
-            if not self.StructureControl(formula,structure_obj):
+            if not self.StructureControl(formula,structure_obj,project):
                 return None
 
             generic = comp.anonymized_formula
@@ -323,6 +327,31 @@ class MaterialDatabaseAPI:
             cursor.close()
             conn.close()
         return data
+
+    def fetch_table(self, table_name: str) -> list[dict]:
+        """Fetch all rows from an allowed table."""
+        ALLOWED_TABLES = {"Uploads", "Compositions", "Structures", "Properties"}
+        if table_name not in ALLOWED_TABLES:
+            raise ValueError(
+                f"Invalid table name '{table_name}'. Allowed: {ALLOWED_TABLES}"
+            )
+
+        conn = self._get_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        query = f"SELECT * FROM `{table_name}`;"
+
+        try:
+            cursor.execute(query)
+            # fetchall() already returns a list of dicts (or empty list if no rows)
+            return cursor.fetchall() or []
+
+        except mysql.connector.Error as err:
+            print(f"Database query failed. Error: {err}")
+            raise err
+        finally:
+            cursor.close()
+            conn.close()
 
     def get_property(self, by=None, entry=None):
 
@@ -528,20 +557,21 @@ class MaterialDatabaseAPI:
         
         try:
             cursor.execute(query, (struc_id,))
-            rows = cursor.fetchall()
-            if not rows:
-                return rows
+            row = cursor.fetchall()[0]
+            if not row:
+                return row
             
             os.makedirs(path, exist_ok=True)
-            for row in rows:
-                formula= row['formula']
-                spacegroup= row['spacegroup']
-                decompressed_bytes = zlib.decompress(row['compressed_structure'])
-                structure_dict = json.loads(decompressed_bytes.decode('utf-8'))
-                struct_obj = Structure.from_dict(structure_dict)
+            formula= row['formula']
+            spacegroup= row['spacegroup']
+            decompressed_bytes = zlib.decompress(row['compressed_structure'])
+            structure_dict = json.loads(decompressed_bytes.decode('utf-8'))
+            struct_obj = Structure.from_dict(structure_dict)
 
-                writer = CifWriter(struct_obj, symprec=1e-2, angle_tolerance=5, refine_struct=True)
-                writer.write_file(os.path.join(path,formula+"_sym"+str(spacegroup)+"_"+str(struc_id)+".cif"))
+            struc_path=os.path.join(path,formula+"_sym"+str(spacegroup)+"_s"+str(struc_id)+".cif")
+            writer = CifWriter(struct_obj, symprec=1e-2, angle_tolerance=5, refine_struct=True)
+            writer.write_file(struc_path)
+            return struc_path
 
         except mysql.connector.Error as err:
                     print(f"Database query failed. Error: {err}")
@@ -550,13 +580,11 @@ class MaterialDatabaseAPI:
             cursor.close()
             conn.close()
 
-    # def generate_input(self,struc_id,path,args_list):
-    #     from autocasp.autocasp import main
-    #     self.write_cif(struc_id,path)
-    #     main(args_list)
-    def generate_input(self,args_list):
-        from autocasp.autocasp import main
-        main(args_list)
+    def generate_castep_input(self,struc_id,path):
+        import autocasp
+
+        struc_path=self.write_cif(struc_id,path)
+        autocasp.run(cif_file=struc_path)
     
     def clear_database(self):
             """
