@@ -580,51 +580,63 @@ class MaterialDatabaseAPI:
             cursor.close()
             conn.close()
 
-    def generate_castep_input(self,struc_id,path):
+    def generate_castep_input(self,struc_id,path="./",conf=None,precision="ultrafine",dycalcpopnbond=False,mixing=None):
         import autocasp
 
         struc_path=self.write_cif(struc_id,path)
-        autocasp.run(cif_file=struc_path)
-    
+        autocasp.run(cif_file=struc_path,conf=conf,precision=precision,dycalcpopnbond=dycalcpopnbond,mixing=mixing)
+
+        
+
     def clear_database(self):
-            """
-            Safely clears all data from Uploads, Structures, Properties, and Compositions,
-            resetting all auto-increment IDs back to 1.
-            """
+        """
+        Safely clears all data from Uploads, Structures, Properties, and Compositions,
+        resetting all auto-increment IDs back to 1. Only accessible by the MySQL 'root' user.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
 
+        try:
+            # Check current MySQL user
+            cursor.execute("SELECT CURRENT_USER();")
+            current_db_user = cursor.fetchone()[0]  # returns 'root@localhost' or similar
+            username = current_db_user.split('@')[0]
+
+            if username != "root":
+                print(f"Permission denied: User '{current_db_user}' is not authorized to clear the database. Only 'root' is permitted.")
+                return False
+
+            # Confirmation prompt
             choice = input("Do you want to delete all entries in the database? (y/n): ").strip().lower()
-            if choice!="y":
-                 print("Operation aborted.")
-                 return False
-            
-            conn = self._get_connection()
-            cursor = conn.cursor()
+            if choice != "y":
+                print("Operation aborted.")
+                return False
 
-            try:
-                print("Clearing all data from TCCDEM_DB...")
-                
-                # 1. Disable foreign key checks temporarily to allow TRUNCATE
-                cursor.execute("SET FOREIGN_KEY_CHECKS = 0;")
-                
-                # 2. Clear tables and reset auto-increment counters
-                tables_to_clear = ["Properties", "Structures", "Compositions", "Uploads"]
-                for table in tables_to_clear:
-                    cursor.execute(f"TRUNCATE TABLE {table};")
-                    print(f" - Emptied table: {table}")
-                    
-                # 3. Re-enable foreign key checks
-                cursor.execute("SET FOREIGN_KEY_CHECKS = 1;")
-                
-                conn.commit()
-                print("Database successfully cleared and reset.")
-                
-            except mysql.connector.Error as err:
-                conn.rollback()
-                print(f"Failed to clear database. Error: {err}")
-                raise err
-            finally:
-                cursor.close()
-                conn.close()
+            print("Clearing all data from TCCDEM_DB...")
+
+            # 1. Disable foreign key checks temporarily to allow TRUNCATE
+            cursor.execute("SET FOREIGN_KEY_CHECKS = 0;")
+
+            # 2. Clear tables and reset auto-increment counters
+            tables_to_clear = ["Properties", "Structures", "Compositions", "Uploads"]
+            for table in tables_to_clear:
+                cursor.execute(f"TRUNCATE TABLE {table};")
+                print(f" - Emptied table: {table}")
+
+            # 3. Re-enable foreign key checks
+            cursor.execute("SET FOREIGN_KEY_CHECKS = 1;")
+
+            conn.commit()
+            print("Database successfully cleared and reset.")
+            return True
+
+        except mysql.connector.Error as err:
+            conn.rollback()
+            print(f"Failed to clear database. Error: {err}")
+            raise err
+        finally:
+            cursor.close()
+            conn.close()
 
     def clear_entries(self, by=None, entry=None):
         """
@@ -641,15 +653,24 @@ class MaterialDatabaseAPI:
         # Normalize username/user key
         filter_by = "username" if by == "user" else by
 
-        choice = input(f"Are you sure you want to delete entries where {filter_by} = '{entry}'? (y/n): ").strip().lower()
-        if choice != "y":
-            print("Operation aborted.")
-            return False
-
         conn = self._get_connection()
         cursor = conn.cursor()
 
         try:
+            # Check current MySQL user
+            cursor.execute("SELECT CURRENT_USER();")
+            current_db_user = cursor.fetchone()[0]  # returns 'root@localhost' or similar
+            username = current_db_user.split('@')[0]
+
+            if username != "root":
+                print(f"Permission denied: User '{current_db_user}' is not authorized to clear the database. Only 'root' is permitted.")
+                return False
+            
+            choice = input(f"Are you sure you want to delete entries where {filter_by} = '{entry}'? (y/n): ").strip().lower()
+            if choice != "y":
+                print("Operation aborted.")
+                return False
+            
             # Case 1: Delete only a single Property record
             if filter_by == "prop_id":
                 cursor.execute("DELETE FROM Properties WHERE prop_id = %s;", (entry,))
@@ -716,3 +737,44 @@ class MaterialDatabaseAPI:
         finally:
             cursor.close()
             conn.close()
+
+
+    # def clear_database(self):
+    #         """
+    #         Safely clears all data from Uploads, Structures, Properties, and Compositions,
+    #         resetting all auto-increment IDs back to 1.
+    #         """
+
+    #         choice = input("Do you want to delete all entries in the database? (y/n): ").strip().lower()
+    #         if choice!="y":
+    #              print("Operation aborted.")
+    #              return False
+            
+    #         conn = self._get_connection()
+    #         cursor = conn.cursor()
+
+    #         try:
+    #             print("Clearing all data from TCCDEM_DB...")
+                
+    #             # 1. Disable foreign key checks temporarily to allow TRUNCATE
+    #             cursor.execute("SET FOREIGN_KEY_CHECKS = 0;")
+                
+    #             # 2. Clear tables and reset auto-increment counters
+    #             tables_to_clear = ["Properties", "Structures", "Compositions", "Uploads"]
+    #             for table in tables_to_clear:
+    #                 cursor.execute(f"TRUNCATE TABLE {table};")
+    #                 print(f" - Emptied table: {table}")
+                    
+    #             # 3. Re-enable foreign key checks
+    #             cursor.execute("SET FOREIGN_KEY_CHECKS = 1;")
+                
+    #             conn.commit()
+    #             print("Database successfully cleared and reset.")
+                
+    #         except mysql.connector.Error as err:
+    #             conn.rollback()
+    #             print(f"Failed to clear database. Error: {err}")
+    #             raise err
+    #         finally:
+    #             cursor.close()
+    #             conn.close()
